@@ -1,0 +1,50 @@
+[
+    {
+        "example_number": 0,
+        "query": "Evaluate the effect of Facebook's (Meta) advertising revenue trends on its overall profitability. Provide a comparative analysis with Google's advertising revenue trends."
+    },
+    {
+        "example_number": 1,
+        "query": "What risk factors has Merck identified in their most recent 10-Q?"
+    },
+    {
+        "example_number": 2,
+        "query": "How have changes in battery technology affected the production costs and profit margins of Tesla and Nissan? Include a historical comparison."
+    },
+    {
+        "example_number": 3,
+        "query": "What are the significant accounting policies mentioned in the 10-K report for Pfizer? Identify the key changes from prior years and also compare with peers, and industry best practices to comment on likely risks/red flags."
+    },
+    {
+        "example_number": 4,
+        "query": "What is the impact of delayed or missed production targets on Apple's financials, revenues, and profit margins? Quantify the impact by business segment or product line. I am keen on insights, not generic impact."
+    },
+    {
+        "example_number": 5,
+        "query": "Analyze how changes in vacancy rates are affecting Simon Property Group's revenue and occupancy targets. Compare with historical data and industry averages."
+    },
+    {
+        "example_number": 6,
+        "query": "Assess the impact of Coca-Cola's recent marketing campaigns on its brand perception and sales growth. Include data from the last three quarters."
+    },
+    {
+        "example_number": 7,
+        "query": "How have fluctuations in commodity prices affected Target's cost of goods sold and profit margins? Include a historical comparison."
+    },
+    {
+        "example_number": 8,
+        "query": "What are the key financial highlights from the latest 10-Q report for Amazon? Compare these with the financial highlights of Netflix."
+    },
+    {
+        "example_number": 9,
+        "query": "Comment on how Banking, Insurance, and KYC growth is helping Moody's Analytics revenue performance."
+    },
+    {
+        "example_number": 10,
+        "query": "What are the topics or themes that investors asked persistently, but Moody's management evaded or did not give a satisfactory response?"
+    },
+    {
+        "example_number": 11,
+        "query": "What are the topics or themes that investors asked persistently, but Boeing's management evaded or did not give a satisfactory response?"
+    }
+]

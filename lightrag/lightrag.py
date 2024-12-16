@@ -1,20 +1,20 @@
 import asyncio
 import os
-from tqdm.asyncio import tqdm as tqdm_async
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from functools import partial
-from typing import Type, cast
+from typing import Type, Dict, Any, cast
 
 from .llm import (
-    gpt_4o_mini_complete,
+    gpt_4o_complete_batch,
     openai_embedding,
 )
 from .operate import (
     chunking_by_token_size,
     extract_entities,
-    # local_query,global_query,hybrid_query,
-    kg_query,
+    local_query,
+    global_query,
+    hybrid_query,
     naive_query,
 )
 
@@ -40,6 +40,10 @@ from .storage import (
     NetworkXStorage,
 )
 
+from .kg.neo4j_impl import Neo4JStorage
+
+from .kg.oracle_impl import OracleKVStorage, OracleGraphStorage, OracleVectorDBStorage
+
 # future KG integrations
 
 # from .kg.ArangoDB_impl import (
@@ -47,53 +51,16 @@ from .storage import (
 # )
 
 
-def lazy_external_import(module_name: str, class_name: str):
-    """Lazily import an external module and return a class from it."""
-
-    def import_class():
-        import importlib
-
-        # Import the module using importlib
-        module = importlib.import_module(module_name)
-
-        # Get the class from the module
-        return getattr(module, class_name)
-
-    # Return the import_class function itself, not its result
-    return import_class
-
-
-Neo4JStorage = lazy_external_import(".kg.neo4j_impl", "Neo4JStorage")
-OracleKVStorage = lazy_external_import(".kg.oracle_impl", "OracleKVStorage")
-OracleGraphStorage = lazy_external_import(".kg.oracle_impl", "OracleGraphStorage")
-OracleVectorDBStorage = lazy_external_import(".kg.oracle_impl", "OracleVectorDBStorage")
-MilvusVectorDBStorge = lazy_external_import(".kg.milvus_impl", "MilvusVectorDBStorge")
-MongoKVStorage = lazy_external_import(".kg.mongo_impl", "MongoKVStorage")
-
-
 def always_get_an_event_loop() -> asyncio.AbstractEventLoop:
-    """
-    Ensure that there is always an event loop available.
-
-    This function tries to get the current event loop. If the current event loop is closed or does not exist,
-    it creates a new event loop and sets it as the current event loop.
-
-    Returns:
-        asyncio.AbstractEventLoop: The current or newly created event loop.
-    """
     try:
-        # Try to get the current event loop
-        current_loop = asyncio.get_event_loop()
-        if current_loop.is_closed():
-            raise RuntimeError("Event loop is closed.")
-        return current_loop
+        return asyncio.get_event_loop()
 
     except RuntimeError:
-        # If no event loop exists or it is closed, create a new one
         logger.info("Creating a new event loop in main thread.")
-        new_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(new_loop)
-        return new_loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        return loop
 
 
 @dataclass
@@ -101,20 +68,17 @@ class LightRAG:
     working_dir: str = field(
         default_factory=lambda: f"./lightrag_cache_{datetime.now().strftime('%Y-%m-%d-%H:%M:%S')}"
     )
-    # Default not to use embedding cache
-    embedding_cache_config: dict = field(
-        default_factory=lambda: {
-            "enabled": False,
-            "similarity_threshold": 0.95,
-            "use_llm_check": False,
-        }
-    )
+
     kv_storage: str = field(default="JsonKVStorage")
     vector_storage: str = field(default="NanoVectorDBStorage")
     graph_storage: str = field(default="NetworkXStorage")
 
     current_log_level = logger.level
     log_level: str = field(default=current_log_level)
+
+    token_counter: dict = field(default_factory=lambda: {       
+         "llm": {"sent": 0, "received": 0, "total": 0},
+        "embedding": {"sent": 0, "received": 0, "total": 0}})
 
     # text chunking
     chunk_token_size: int = 1200
@@ -144,7 +108,7 @@ class LightRAG:
     embedding_func_max_async: int = 16
 
     # LLM
-    llm_model_func: callable = gpt_4o_mini_complete  # hf_model_complete#
+    llm_model_func: callable = gpt_4o_complete_batch  # hf_model_complete#
     llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
     llm_model_max_token_size: int = 32768
     llm_model_max_async: int = 16
@@ -160,7 +124,7 @@ class LightRAG:
     convert_response_to_json_func: callable = convert_response_to_json
 
     def __post_init__(self):
-        log_file = os.path.join("lightrag.log")
+        log_file = os.path.join(self.working_dir, "lightrag.log")
         set_logger(log_file)
         logger.setLevel(self.log_level)
 
@@ -194,6 +158,7 @@ class LightRAG:
             if self.enable_llm_cache
             else None
         )
+
         self.embedding_func = limit_async_func_call(self.embedding_func_max_async)(
             self.embedding_func
         )
@@ -251,16 +216,29 @@ class LightRAG:
             # kv storage
             "JsonKVStorage": JsonKVStorage,
             "OracleKVStorage": OracleKVStorage,
-            "MongoKVStorage": MongoKVStorage,
             # vector storage
             "NanoVectorDBStorage": NanoVectorDBStorage,
             "OracleVectorDBStorage": OracleVectorDBStorage,
-            "MilvusVectorDBStorge": MilvusVectorDBStorge,
             # graph storage
             "NetworkXStorage": NetworkXStorage,
             "Neo4JStorage": Neo4JStorage,
             "OracleGraphStorage": OracleGraphStorage,
             # "ArangoDBStorage": ArangoDBStorage
+        }
+    
+    def _update_token_count(self, input_tokens, output_tokens):
+        """Updates the token count based on the input and output tokens."""
+        self.token_counter["llm"]["sent"] += input_tokens
+        self.token_counter["llm"]["received"] += output_tokens
+        self.token_counter["llm"]["total"] += input_tokens + output_tokens
+    
+
+    def get_token_usage(self) -> Dict[str, Any]:
+        """Returns the current token usage statistics."""
+        return {
+            "total_tokens": self.token_counter["llm"]["total"],
+            "input_tokens": self.token_counter["llm"]["sent"],
+            "output_tokens": self.token_counter["llm"]["received"],
         }
 
     def insert(self, string_or_strings):
@@ -286,9 +264,7 @@ class LightRAG:
             logger.info(f"[New Docs] inserting {len(new_docs)} docs")
 
             inserting_chunks = {}
-            for doc_key, doc in tqdm_async(
-                new_docs.items(), desc="Chunking documents", unit="doc"
-            ):
+            for doc_key, doc in new_docs.items():
                 chunks = {
                     compute_mdhash_id(dp["content"], prefix="chunk-"): {
                         **dp,
@@ -314,6 +290,10 @@ class LightRAG:
             logger.info(f"[New Chunks] inserting {len(inserting_chunks)} chunks")
 
             await self.chunks_vdb.upsert(inserting_chunks)
+
+            input_tokens = sum(len(chunk["content"].split()) for chunk in inserting_chunks.values())
+            output_tokens = input_tokens
+            self._update_token_count(input_tokens, output_tokens)
 
             logger.info("[Entity Extraction]...")
             maybe_new_kg = await extract_entities(
@@ -350,149 +330,15 @@ class LightRAG:
             tasks.append(cast(StorageNameSpace, storage_inst).index_done_callback())
         await asyncio.gather(*tasks)
 
-    def insert_custom_kg(self, custom_kg: dict):
-        loop = always_get_an_event_loop()
-        return loop.run_until_complete(self.ainsert_custom_kg(custom_kg))
-
-    async def ainsert_custom_kg(self, custom_kg: dict):
-        update_storage = False
-        try:
-            # Insert chunks into vector storage
-            all_chunks_data = {}
-            chunk_to_source_map = {}
-            for chunk_data in custom_kg.get("chunks", []):
-                chunk_content = chunk_data["content"]
-                source_id = chunk_data["source_id"]
-                chunk_id = compute_mdhash_id(chunk_content.strip(), prefix="chunk-")
-
-                chunk_entry = {"content": chunk_content.strip(), "source_id": source_id}
-                all_chunks_data[chunk_id] = chunk_entry
-                chunk_to_source_map[source_id] = chunk_id
-                update_storage = True
-
-            if self.chunks_vdb is not None and all_chunks_data:
-                await self.chunks_vdb.upsert(all_chunks_data)
-            if self.text_chunks is not None and all_chunks_data:
-                await self.text_chunks.upsert(all_chunks_data)
-
-            # Insert entities into knowledge graph
-            all_entities_data = []
-            for entity_data in custom_kg.get("entities", []):
-                entity_name = f'"{entity_data["entity_name"].upper()}"'
-                entity_type = entity_data.get("entity_type", "UNKNOWN")
-                description = entity_data.get("description", "No description provided")
-                # source_id = entity_data["source_id"]
-                source_chunk_id = entity_data.get("source_id", "UNKNOWN")
-                source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
-
-                # Log if source_id is UNKNOWN
-                if source_id == "UNKNOWN":
-                    logger.warning(
-                        f"Entity '{entity_name}' has an UNKNOWN source_id. Please check the source mapping."
-                    )
-
-                # Prepare node data
-                node_data = {
-                    "entity_type": entity_type,
-                    "description": description,
-                    "source_id": source_id,
-                }
-                # Insert node data into the knowledge graph
-                await self.chunk_entity_relation_graph.upsert_node(
-                    entity_name, node_data=node_data
-                )
-                node_data["entity_name"] = entity_name
-                all_entities_data.append(node_data)
-                update_storage = True
-
-            # Insert relationships into knowledge graph
-            all_relationships_data = []
-            for relationship_data in custom_kg.get("relationships", []):
-                src_id = f'"{relationship_data["src_id"].upper()}"'
-                tgt_id = f'"{relationship_data["tgt_id"].upper()}"'
-                description = relationship_data["description"]
-                keywords = relationship_data["keywords"]
-                weight = relationship_data.get("weight", 1.0)
-                # source_id = relationship_data["source_id"]
-                source_chunk_id = relationship_data.get("source_id", "UNKNOWN")
-                source_id = chunk_to_source_map.get(source_chunk_id, "UNKNOWN")
-
-                # Log if source_id is UNKNOWN
-                if source_id == "UNKNOWN":
-                    logger.warning(
-                        f"Relationship from '{src_id}' to '{tgt_id}' has an UNKNOWN source_id. Please check the source mapping."
-                    )
-
-                # Check if nodes exist in the knowledge graph
-                for need_insert_id in [src_id, tgt_id]:
-                    if not (
-                        await self.chunk_entity_relation_graph.has_node(need_insert_id)
-                    ):
-                        await self.chunk_entity_relation_graph.upsert_node(
-                            need_insert_id,
-                            node_data={
-                                "source_id": source_id,
-                                "description": "UNKNOWN",
-                                "entity_type": "UNKNOWN",
-                            },
-                        )
-
-                # Insert edge into the knowledge graph
-                await self.chunk_entity_relation_graph.upsert_edge(
-                    src_id,
-                    tgt_id,
-                    edge_data={
-                        "weight": weight,
-                        "description": description,
-                        "keywords": keywords,
-                        "source_id": source_id,
-                    },
-                )
-                edge_data = {
-                    "src_id": src_id,
-                    "tgt_id": tgt_id,
-                    "description": description,
-                    "keywords": keywords,
-                }
-                all_relationships_data.append(edge_data)
-                update_storage = True
-
-            # Insert entities into vector storage if needed
-            if self.entities_vdb is not None:
-                data_for_vdb = {
-                    compute_mdhash_id(dp["entity_name"], prefix="ent-"): {
-                        "content": dp["entity_name"] + dp["description"],
-                        "entity_name": dp["entity_name"],
-                    }
-                    for dp in all_entities_data
-                }
-                await self.entities_vdb.upsert(data_for_vdb)
-
-            # Insert relationships into vector storage if needed
-            if self.relationships_vdb is not None:
-                data_for_vdb = {
-                    compute_mdhash_id(dp["src_id"] + dp["tgt_id"], prefix="rel-"): {
-                        "src_id": dp["src_id"],
-                        "tgt_id": dp["tgt_id"],
-                        "content": dp["keywords"]
-                        + dp["src_id"]
-                        + dp["tgt_id"]
-                        + dp["description"],
-                    }
-                    for dp in all_relationships_data
-                }
-                await self.relationships_vdb.upsert(data_for_vdb)
-        finally:
-            if update_storage:
-                await self._insert_done()
+        self.logger.info(f"Total tokens used after knowledge graph creation: {self.total_tokens}")
 
     def query(self, query: str, param: QueryParam = QueryParam()):
         loop = always_get_an_event_loop()
         return loop.run_until_complete(self.aquery(query, param))
 
     async def aquery(self, query: str, param: QueryParam = QueryParam()):
-        if param.mode in ["local", "global", "hybrid"]:
-            response = await kg_query(
+        if param.mode == "local":
+            response = await local_query(
                 query,
                 self.chunk_entity_relation_graph,
                 self.entities_vdb,
@@ -500,7 +346,26 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
-                hashing_kv=self.llm_response_cache,
+            )
+        elif param.mode == "global":
+            response = await global_query(
+                query,
+                self.chunk_entity_relation_graph,
+                self.entities_vdb,
+                self.relationships_vdb,
+                self.text_chunks,
+                param,
+                asdict(self),
+            )
+        elif param.mode == "hybrid":
+            response = await hybrid_query(
+                query,
+                self.chunk_entity_relation_graph,
+                self.entities_vdb,
+                self.relationships_vdb,
+                self.text_chunks,
+                param,
+                asdict(self),
             )
         elif param.mode == "naive":
             response = await naive_query(
@@ -509,7 +374,6 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
-                hashing_kv=self.llm_response_cache,
             )
         else:
             raise ValueError(f"Unknown mode {param.mode}")
