@@ -56,6 +56,7 @@ async def openai_complete_if_cache(
     history_messages=[],
     base_url=None,
     api_key=None,
+    lightrag_instance=None,
     **kwargs,
 ) -> str:
     if api_key:
@@ -85,6 +86,11 @@ async def openai_complete_if_cache(
         response = await openai_async_client.chat.completions.create(
             model=model, messages=messages, **kwargs
         )
+
+    if lightrag_instance and hasattr(response, "usage"):
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        lightrag_instance.update_token_count(input_tokens, output_tokens)
 
     if hasattr(response, "__aiter__"):
 
@@ -486,7 +492,7 @@ async def openai_complete(
 
 
 async def gpt_4o_complete(
-    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, **kwargs
+    prompt, system_prompt=None, history_messages=[], keyword_extraction=False, lightrag_instance=None, **kwargs
 ) -> str:
     keyword_extraction = kwargs.pop("keyword_extraction", None)
     if keyword_extraction:
@@ -496,6 +502,7 @@ async def gpt_4o_complete(
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
+        lightrag_instance=lightrag_instance,
         **kwargs,
     )
 

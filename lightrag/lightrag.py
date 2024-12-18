@@ -6,15 +6,14 @@ from functools import partial
 from typing import Type, Dict, Any, cast
 
 from .llm import (
-    gpt_4o_complete_batch,
+    gpt_4o_complete,
     openai_embedding,
 )
 from .operate import (
     chunking_by_token_size,
     extract_entities,
-    local_query,
-    global_query,
-    hybrid_query,
+    # local_query,global_query,hybrid_query,
+    kg_query,
     naive_query,
 )
 
@@ -79,6 +78,8 @@ class LightRAG:
     token_counter: dict = field(default_factory=lambda: {       
          "llm": {"sent": 0, "received": 0, "total": 0},
         "embedding": {"sent": 0, "received": 0, "total": 0}})
+    
+    current_file_info: Dict[str, str] = field(default_factory=dict) 
 
     # text chunking
     chunk_token_size: int = 1200
@@ -108,7 +109,7 @@ class LightRAG:
     embedding_func_max_async: int = 16
 
     # LLM
-    llm_model_func: callable = gpt_4o_complete_batch  # hf_model_complete#
+    llm_model_func: callable = gpt_4o_complete  # hf_model_complete#
     llm_model_name: str = "meta-llama/Llama-3.2-1B-Instruct"  #'meta-llama/Llama-3.2-1B'#'google/gemma-2-2b-it'
     llm_model_max_token_size: int = 32768
     llm_model_max_async: int = 16
@@ -124,14 +125,15 @@ class LightRAG:
     convert_response_to_json_func: callable = convert_response_to_json
 
     def __post_init__(self):
-        log_file = os.path.join(self.working_dir, "lightrag.log")
-        set_logger(log_file)
-        logger.setLevel(self.log_level)
 
-        logger.info(f"Logger initialized for working directory: {self.working_dir}")
+
+        log_file = os.path.join(self.working_dir, "lightrag.log")
+        self.logger = set_logger(log_file, level=self.log_level, logger_name="lightrag")
+        self.logger.setLevel(self.log_level)    
+        self.logger.info(f"Logger initialized for working directory: {self.working_dir}")  
 
         _print_config = ",\n  ".join([f"{k} = {v}" for k, v in asdict(self).items()])
-        logger.debug(f"LightRAG init with param:\n  {_print_config}\n")
+        self.logger.debug(f"LightRAG init with param:\n  {_print_config}\n")
 
         # @TODO: should move all storage setup here to leverage initial start params attached to self.
 
@@ -146,7 +148,7 @@ class LightRAG:
         ]
 
         if not os.path.exists(self.working_dir):
-            logger.info(f"Creating working directory {self.working_dir}")
+            self.logger.info(f"Creating working directory {self.working_dir}")
             os.makedirs(self.working_dir)
 
         self.llm_response_cache = (
@@ -204,12 +206,13 @@ class LightRAG:
         )
 
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(
-            partial(
-                self.llm_model_func,
-                hashing_kv=self.llm_response_cache,
-                **self.llm_model_kwargs,
-            )
+        partial(
+            self.llm_model_func,
+            hashing_kv=self.llm_response_cache,
+            lightrag_instance=self,
+            **self.llm_model_kwargs,
         )
+    )
 
     def _get_storage_class(self) -> Type[BaseGraphStorage]:
         return {
@@ -226,12 +229,17 @@ class LightRAG:
             # "ArangoDBStorage": ArangoDBStorage
         }
     
-    def _update_token_count(self, input_tokens, output_tokens):
-        """Updates the token count based on the input and output tokens."""
-        self.token_counter["llm"]["sent"] += input_tokens
+    def update_token_count(self, input_tokens: int, output_tokens: int):
+        self.token_counter["llm"]["sent"] += input_tokens        
         self.token_counter["llm"]["received"] += output_tokens
-        self.token_counter["llm"]["total"] += input_tokens + output_tokens
-    
+        self.token_counter["llm"]["total"] += input_tokens + output_tokens        
+        self.logger.info(f"Updated token count - Input: {input_tokens}, Output: {output_tokens}, Total: {self.token_counter['llm']['total']}")
+
+
+    def set_current_file_info(self, subfolder: str, filename: str):
+        self.current_file_info = {"subfolder": subfolder, "filename": filename}        
+        self.logger.info(f"Processing file: {subfolder}/{filename}")    
+
 
     def get_token_usage(self) -> Dict[str, Any]:
         """Returns the current token usage statistics."""
@@ -242,10 +250,16 @@ class LightRAG:
         }
 
     def insert(self, string_or_strings):
+
+        self.logger.info(
+        f"Inserting content from {self.current_file_info.get('subfolder', 'Unknown')}/"
+        f"{self.current_file_info.get('filename', 'Unknown')}")
+
         loop = always_get_an_event_loop()
         return loop.run_until_complete(self.ainsert(string_or_strings))
 
     async def ainsert(self, string_or_strings):
+        
         update_storage = False
         try:
             if isinstance(string_or_strings, str):
@@ -258,10 +272,13 @@ class LightRAG:
             _add_doc_keys = await self.full_docs.filter_keys(list(new_docs.keys()))
             new_docs = {k: v for k, v in new_docs.items() if k in _add_doc_keys}
             if not len(new_docs):
-                logger.warning("All docs are already in the storage")
+                self.logger.warning("All docs are already in the storage")
                 return
             update_storage = True
-            logger.info(f"[New Docs] inserting {len(new_docs)} docs")
+            self.logger.info(f"[New Docs] inserting {len(new_docs)} docs")
+            self.logger.info(f"Finished processing {self.current_file_info.get('subfolder', 'Unknown')}/{self.current_file_info.get('filename', 'Unknown')}. "
+                                f"Total tokens used: {self.token_counter['llm']['total']}")
+
 
             inserting_chunks = {}
             for doc_key, doc in new_docs.items():
@@ -285,17 +302,17 @@ class LightRAG:
                 k: v for k, v in inserting_chunks.items() if k in _add_chunk_keys
             }
             if not len(inserting_chunks):
-                logger.warning("All chunks are already in the storage")
+                self.logger.warning("All chunks are already in the storage")
                 return
-            logger.info(f"[New Chunks] inserting {len(inserting_chunks)} chunks")
+            self.logger.info(f"[New Chunks] inserting {len(inserting_chunks)} chunks")
 
             await self.chunks_vdb.upsert(inserting_chunks)
 
             input_tokens = sum(len(chunk["content"].split()) for chunk in inserting_chunks.values())
             output_tokens = input_tokens
-            self._update_token_count(input_tokens, output_tokens)
+            self.update_token_count(input_tokens, output_tokens)
 
-            logger.info("[Entity Extraction]...")
+            self.logger.info("[Entity Extraction]...")
             maybe_new_kg = await extract_entities(
                 inserting_chunks,
                 knowledge_graph_inst=self.chunk_entity_relation_graph,
@@ -304,7 +321,7 @@ class LightRAG:
                 global_config=asdict(self),
             )
             if maybe_new_kg is None:
-                logger.warning("No new entities and relationships found")
+                self.logger.warning("No new entities and relationships found")
                 return
             self.chunk_entity_relation_graph = maybe_new_kg
 
@@ -315,6 +332,12 @@ class LightRAG:
                 await self._insert_done()
 
     async def _insert_done(self):
+
+        self.logger.info(
+        f"Finished processing {self.current_file_info.get('subfolder', 'Unknown')}/"
+        f"{self.current_file_info.get('filename', 'Unknown')}. "
+        f"Total tokens used: {self.token_counter['llm']['total']}")
+
         tasks = []
         for storage_inst in [
             self.full_docs,
@@ -330,7 +353,7 @@ class LightRAG:
             tasks.append(cast(StorageNameSpace, storage_inst).index_done_callback())
         await asyncio.gather(*tasks)
 
-        self.logger.info(f"Total tokens used after knowledge graph creation: {self.total_tokens}")
+        self.logger.info(f"Total tokens used after knowledge graph creation: {self.token_counter['llm']['total']}")
 
     def query(self, query: str, param: QueryParam = QueryParam()):
         loop = always_get_an_event_loop()
@@ -400,12 +423,12 @@ class LightRAG:
             await self.relationships_vdb.delete_relation(entity_name)
             await self.chunk_entity_relation_graph.delete_node(entity_name)
 
-            logger.info(
+            self.logger.info(
                 f"Entity '{entity_name}' and its relationships have been deleted."
             )
             await self._delete_by_entity_done()
         except Exception as e:
-            logger.error(f"Error while deleting entity '{entity_name}': {e}")
+            self.logger.error(f"Error while deleting entity '{entity_name}': {e}")
 
     async def _delete_by_entity_done(self):
         tasks = []
