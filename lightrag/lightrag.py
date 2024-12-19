@@ -79,6 +79,7 @@ MongoKVStorage = lazy_external_import(".kg.mongo_impl", "MongoKVStorage")
 ChromaVectorDBStorage = lazy_external_import(".kg.chroma_impl", "ChromaVectorDBStorage")
 TiDBKVStorage = lazy_external_import(".kg.tidb_impl", "TiDBKVStorage")
 TiDBVectorDBStorage = lazy_external_import(".kg.tidb_impl", "TiDBVectorDBStorage")
+TiDBGraphStorage = lazy_external_import(".kg.tidb_impl", "TiDBGraphStorage")
 AGEStorage = lazy_external_import(".kg.age_impl", "AGEStorage")
 
 
@@ -252,7 +253,14 @@ class LightRAG:
         self.llm_model_func = limit_async_func_call(self.llm_model_max_async)(
             partial(
                 self.llm_model_func,
-                hashing_kv=self.llm_response_cache,
+                hashing_kv=self.llm_response_cache
+                if self.llm_response_cache
+                and hasattr(self.llm_response_cache, "global_config")
+                else self.key_string_value_json_storage_cls(
+                    namespace="llm_response_cache",
+                    global_config=asdict(self),
+                    embedding_func=None,
+                ),
                 **self.llm_model_kwargs,
             )
         )
@@ -275,6 +283,7 @@ class LightRAG:
             "Neo4JStorage": Neo4JStorage,
             "OracleGraphStorage": OracleGraphStorage,
             "AGEStorage": AGEStorage,
+            "TiDBGraphStorage": TiDBGraphStorage,
             # "ArangoDBStorage": ArangoDBStorage
         }
 
@@ -515,7 +524,14 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
-                hashing_kv=self.llm_response_cache,
+                hashing_kv=self.llm_response_cache
+                if self.llm_response_cache
+                and hasattr(self.llm_response_cache, "global_config")
+                else self.key_string_value_json_storage_cls(
+                    namespace="llm_response_cache",
+                    global_config=asdict(self),
+                    embedding_func=None,
+                ),
             )
         elif param.mode == "naive":
             response = await naive_query(
@@ -524,7 +540,14 @@ class LightRAG:
                 self.text_chunks,
                 param,
                 asdict(self),
-                hashing_kv=self.llm_response_cache,
+                hashing_kv=self.llm_response_cache
+                if self.llm_response_cache
+                and hasattr(self.llm_response_cache, "global_config")
+                else self.key_string_value_json_storage_cls(
+                    namespace="llm_response_cache",
+                    global_config=asdict(self),
+                    embedding_func=None,
+                ),
             )
         else:
             raise ValueError(f"Unknown mode {param.mode}")
